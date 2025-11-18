@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         USOS Web Plus
 // @namespace    http://tampermonkey.net/
-// @version      0.0.1
+// @version      0.1.0
 // @description  USOS Web Plus - dark mode with additional features
 // @author       smx*
 // @match        *://*/*
@@ -12,6 +12,10 @@
 // @grant        GM_addStyle
 // @run-at       document-idle
 // @license      MIT
+// @homepageURL  https://github.com/esemx/usos-web-plus
+// @supportURL   https://github.com/esemx/usos-web-plus/issues
+// @updateURL    https://github.com/esemx/usos-web-plus/raw/main/usos-web-plus.user.js
+// @downloadURL  https://github.com/esemx/usos-web-plus/raw/main/usos-web-plus.user.js
 // ==/UserScript==
 
 (function() {
@@ -31,6 +35,8 @@
     DIALOG_BUTTON_HOVER: '#4a4a4a',
     DIALOG_LINK: '#4fc3f7',
     DIALOG_LINK_HOVER: '#81d4fa',
+    AVG_ROW_BG: 'rgba(255, 255, 255, 0.7)',
+    AVG_ROW_BORDER: '#dbdbd7',
   };
 
   const SELECTORS = {
@@ -40,6 +46,7 @@
     USOS_FRAME: 'usos-frame',
     USOS_DIALOG: 'usos-dialog',
     INFO_BOXES: 'info-box, notice-box',
+    GRADE_TABLES: 'usos-frame-section table',
   };
 
   const UPDATE_INTERVALS = {
@@ -55,46 +62,46 @@
 
   const PERFORMANCE_CONFIG = { FRAME_BUDGET: 16.67 };
 
-	/**
-	 * Caches results of querySelectorAll to improve performance.
-	 * Automatically invalidates cache if stale or elements removed from DOM.
-	 */
+  /**
+   * Caches results of querySelectorAll to improve performance.
+   * Automatically invalidates cache if stale or elements removed from DOM.
+   */
   class DOMCache {
     static #cache = new Map();
     static #cacheTime = new Map();
 
-		/**
-		 * Returns elements matching the CSS selector, using cache if valid.
-		 * @param {string} selector - CSS selector string.
-		 * @returns {Element[]} Array of matching DOM elements.
-		 */
+    /**
+     * Returns elements matching the CSS selector, using cache if valid.
+     * @param {string} selector - CSS selector string.
+     * @returns {Element[]} Array of matching DOM elements.
+     */
     static query(selector) {
       if (!CACHE_CONFIG.ENABLED) return Array.from(document.querySelectorAll(selector));
-			
+      
       const now = Date.now();
       const cached = this.#cache.get(selector);
       const ts = this.#cacheTime.get(selector);
-			
+      
       if (cached?.length && (now - ts) < CACHE_CONFIG.DURATION) {
         if (cached.length <= 2 || (document.contains(cached[0]) && document.contains(cached[cached.length - 1]))) {
           return cached;
         }
       }
-			
+      
       const els = Array.from(document.querySelectorAll(selector));
-			
+      
       this.#cache.set(selector, els);
       this.#cacheTime.set(selector, now);
-			
+      
       return els;
     }
 
-		/**
-		 * Invalidates cached entries for a specific selector or all if none provided.
-		 * @param {string} [selector] - Optional CSS selector to invalidate cache for.
-		 *                              If omitted, clears entire cache.
-		 * @returns {void}
-		 */
+    /**
+     * Invalidates cached entries for a specific selector or all if none provided.
+     * @param {string} [selector] - Optional CSS selector to invalidate cache for.
+     *                              If omitted, clears entire cache.
+     * @returns {void}
+     */
     static invalidate(selector = null) {
       if (selector) {
         this.#cache.delete(selector);
@@ -105,13 +112,13 @@
       }
     }
 
-		/**
-		 * Removes stale cache entries older than configured maximum age.
-		 * @returns {void}
-		 */
+    /**
+     * Removes stale cache entries older than configured maximum age.
+     * @returns {void}
+     */
     static invalidateStale() {
       const now = Date.now();
-			
+      
       for (const [sel, ts] of this.#cacheTime.entries()) {
         if (now - ts > CACHE_CONFIG.MAX_AGE) this.invalidate(sel);
       }
@@ -122,32 +129,42 @@
    * Wrapper around Greasemonkey/Tampermonkey storage functions for script settings.
    */
   class StorageManager {
-		/** @returns {boolean} Whether dark mode is enabled (default: true) */
+    /** @returns {boolean} Whether dark mode is enabled (default: true) */
     static get darkMode() {
-			return GM_getValue('darkMode', true);
-		}
-		
-		/** @param {boolean} v Set dark mode enabled/disabled */
+      return GM_getValue('darkMode', true);
+    }
+    
+    /** @param {boolean} v Set dark mode enabled/disabled */
     static set darkMode(v) {
-			GM_setValue('darkMode', v);
-		}
-		
-		/** @returns {string} Current stored script version */
+      GM_setValue('darkMode', v);
+    }
+    
+    /** @returns {boolean} Whether average calculator is enabled (default: true) */
+    static get averageCalculator() {
+      return GM_getValue('averageCalculator', true);
+    }
+    
+    /** @param {boolean} v Set average calculator enabled/disabled */
+    static set averageCalculator(v) {
+      GM_setValue('averageCalculator', v);
+    }
+    
+    /** @returns {string} Current stored script version */
     static get version() {
-			return GM_getValue('version', '0.0.1');
-		}
-		
-		/** @param {string} v Set stored script version */
+      return GM_getValue('version', '0.1.0');
+    }
+    
+    /** @param {string} v Set stored script version */
     static set version(v) {
-			GM_setValue('version', v);
-		}
+      GM_setValue('version', v);
+    }
   }
 
   /**
    * Contains CSS styles for Shadow DOM elements such as dialogs and info boxes.
    */
   class ShadowDOMStyles {
-		/**
+    /**
      * Returns CSS styles for dialog components inside Shadow DOM.
      * @returns {string}
      */
@@ -174,6 +191,231 @@
   }
 
   /**
+   * Handles grade average calculations.
+   */
+  class GradeAverageCalculator {
+    static #abortController = new AbortController();
+    static #mutationTimeout = null;
+    static #observer = null;
+
+    /**
+     * Extracts numeric grade value from text.
+     * @param {string} text - Grade text to parse.
+     * @returns {number|null} Numeric grade value or null if invalid.
+     */
+    static #parseGrade(text) {
+      if (!text) return null;
+      
+      const normalized = text.trim().replace(',', '.');
+      const grade = parseFloat(normalized);
+      
+      return (!isNaN(grade) && grade >= 2 && grade <= 5) ? grade : null;
+    }
+
+    /**
+     * Extracts all grades from a table row.
+     * @param {HTMLTableRowElement} row - Table row element.
+     * @returns {number[]} Array of valid numeric grades.
+     */
+    static #extractGradesFromRow(row) {
+      const grades = [];
+      const gradeCell = row.cells[2];
+      
+      if (!gradeCell) return grades;
+      
+      const gradeSpans = gradeCell.querySelectorAll('span[style*="font-weight"]');
+      
+      for (const span of gradeSpans) {
+        const grade = this.#parseGrade(span.textContent);
+        if (grade !== null) grades.push(grade);
+      }
+      
+      return grades;
+    }
+
+    /**
+     * Calculates arithmetic average from array of grades.
+     * @param {number[]} grades - Array of numeric grades.
+     * @returns {number|null} Average value or null if no valid grades.
+     */
+    static #calculateAverage(grades) {
+      if (grades.length === 0) return null;
+      
+      const sum = grades.reduce((acc, grade) => acc + grade, 0);
+      return sum / grades.length;
+    }
+
+    /**
+     * Creates a styled row element displaying the average grade.
+     * @param {number|null} average - Calculated average or null.
+     * @param {number} gradeCount - Number of grades used in calculation.
+     * @param {number} totalSubjects - Total number of subjects in table.
+     * @returns {HTMLTableRowElement} Styled table row element.
+     */
+    static #createAverageRow(average, gradeCount, totalSubjects) {
+      const row = document.createElement('tr');
+      row.className = 'usos-avg-row';
+      
+      const labelCell = document.createElement('td');
+      labelCell.textContent = 'Średnia arytmetyczna';
+      labelCell.style.cssText = 'font-weight: 600; padding: 0.5rem;';
+      
+      const emptyCell1 = document.createElement('td');
+      const emptyCell2 = document.createElement('td');
+      
+      const valueCell = document.createElement('td');
+      valueCell.style.cssText = 'text-align: right; white-space: nowrap; padding: 0.5rem;';
+      
+      const valueDiv = document.createElement('div');
+      const valueSpan = document.createElement('span');
+      valueSpan.style.cssText = 'font-weight: 600; font-size: 115%;';
+      
+      if (average !== null) {
+        valueSpan.textContent = average.toFixed(2);
+        
+        if (gradeCount < totalSubjects) {
+          valueCell.title = `n=${gradeCount}/${totalSubjects}`;
+          
+          const countBadge = document.createElement('span');
+          countBadge.className = 'usos-avg-badge';
+          countBadge.textContent = `(${gradeCount}/${totalSubjects})`;
+          countBadge.style.cssText = 'font-size: 85%; margin-left: 0.5rem; opacity: 0.8;';
+          valueDiv.appendChild(valueSpan);
+          valueDiv.appendChild(countBadge);
+        } else {
+          valueCell.title = `n=${gradeCount}`;
+          valueDiv.appendChild(valueSpan);
+        }
+      } else {
+        valueSpan.textContent = '-';
+        valueDiv.appendChild(valueSpan);
+      }
+      
+      valueCell.appendChild(valueDiv);
+      
+      row.appendChild(labelCell);
+      row.appendChild(emptyCell1);
+      row.appendChild(valueCell);
+      row.appendChild(emptyCell2);
+      
+      row.style.cssText = `
+        background-color: ${COLORS.AVG_ROW_BG};
+        border-top: 2px solid ${COLORS.AVG_ROW_BORDER};
+        font-weight: 600;
+      `;
+      
+      return row;
+    }
+
+    /**
+     * Processes a single grade table and adds average row if not already present.
+     * @param {HTMLTableElement} table - Grade table element.
+     * @returns {void}
+     */
+    static #processTable(table) {
+      if (table.dataset.usosAvgProcessed) return;
+      
+      const tbody = table.querySelector('tbody');
+      if (!tbody) return;
+      
+      const rows = Array.from(tbody.querySelectorAll('tr')).filter(
+        row => !row.classList.contains('usos-avg-row') && !row.classList.contains('usos-avg-row-weighted')
+      );
+      
+      const allGrades = [];
+      
+      for (const row of rows) {
+        const rowGrades = this.#extractGradesFromRow(row);
+        allGrades.push(...rowGrades);
+      }
+      
+      const average = this.#calculateAverage(allGrades);
+      const gradeCount = allGrades.length;
+      const totalSubjects = rows.length;
+      
+      const avgRow = this.#createAverageRow(average, gradeCount, totalSubjects);
+      
+      const existingWeightedRow = tbody.querySelector('.usos-avg-row-weighted');
+      if (existingWeightedRow) {
+        tbody.insertBefore(avgRow, existingWeightedRow);
+      } else {
+        tbody.appendChild(avgRow);
+      }
+      
+      table.dataset.usosAvgProcessed = '1';
+    }
+
+    /**
+     * Processes all grade tables on the page.
+     * @returns {void}
+     */
+    static processAllTables() {
+      requestAnimationFrame(() => {
+        const tables = DOMCache.query(SELECTORS.GRADE_TABLES);
+        
+        tables.forEach(table => {
+          try {
+            this.#processTable(table);
+          } catch (error) {
+            console.error('Error processing grade table:', error);
+          }
+        });
+      });
+    }
+
+    /**
+     * Initializes the average calculator with mutation observer.
+     * @returns {void}
+     */
+    static initialize() {
+      this.processAllTables();
+      this.setupMutationObserver();
+      
+      setTimeout(() => {
+        this.processAllTables();
+      }, 500);
+    }
+
+    /**
+     * Sets up a MutationObserver to watch for DOM changes and recalculate averages.
+     * @returns {void}
+     */
+    static setupMutationObserver() {
+      this.#observer = new MutationObserver(() => {
+        clearTimeout(this.#mutationTimeout);
+        
+        this.#mutationTimeout = setTimeout(() => {
+          this.processAllTables();
+        }, UPDATE_INTERVALS.MUTATION_DELAY);
+      });
+      
+      this.#observer.observe(document.body, {
+        childList: true,
+        subtree: true
+      });
+    }
+
+    /**
+     * Toggles average calculator and reloads the page.
+     * @returns {void}
+     */
+    static toggle() {
+      StorageManager.averageCalculator = !StorageManager.averageCalculator;
+      location.reload();
+    }
+
+    /**
+     * Cleans up observers and timeouts.
+     * @returns {void}
+     */
+    static cleanup() {
+      this.#abortController.abort();
+      if (this.#observer) this.#observer.disconnect();
+      clearTimeout(this.#mutationTimeout);
+    }
+  }
+
+  /**
    * Applies CSS styles to various page elements and Shadow DOM components.
    */
   class StyleApplier {
@@ -185,24 +427,24 @@
      */
     static applySlotTitles() {
       this.#batchApplyStyles(DOMCache.query(SELECTORS.SLOT_TITLES), {
-				color: COLORS.LIGHT_TEXT,
-				'font-weight': '600'
-			});
-    }	
-		
+        color: COLORS.LIGHT_TEXT,
+        'font-weight': '600'
+      });
+    }
+    
     /**
      * Applies CSS styles to table headers and table heads.
      * @returns {void}
      */
     static applyTableHeaders() {
       this.#batchApplyStyles(DOMCache.query(SELECTORS.TABLE_HEADERS), {
-				color: COLORS.LIGHT_TEXT,
-				'font-weight': '600'
-			});
-			
+        color: COLORS.LIGHT_TEXT,
+        'font-weight': '600'
+      });
+      
       this.#batchApplyStyles(DOMCache.query(SELECTORS.TABLE_HEAD), {
-				'border-bottom': `2px solid ${COLORS.BORDER_SEPARATOR}`
-			});
+        'border-bottom': `2px solid ${COLORS.BORDER_SEPARATOR}`
+      });
     }
 
     /**
@@ -212,18 +454,18 @@
      */
     static applyFrameHeaders() {
       const frames = DOMCache.query(SELECTORS.USOS_FRAME);
-			
+      
       requestAnimationFrame(() => {
         frames.forEach(frame => {
           if (!frame.shadowRoot) return;
           const header = frame.shadowRoot.querySelector('#header');
-					
+          
           if (!header) return;
           if (!header.dataset.accentColor) header.dataset.accentColor = getComputedStyle(header).backgroundColor;
-					
+          
           const accent = header.dataset.accentColor;
           const title = frame.querySelector(SELECTORS.SLOT_TITLES);
-					
+          
           const hasTitle = title && title.textContent.trim().length > 0;
           if (hasTitle) {
             header.style.setProperty('background', 'transparent', 'important');
@@ -232,7 +474,7 @@
             header.style.setProperty('background', accent, 'important');
             header.style.setProperty('border-left', 'none', 'important');
           }
-					
+          
           header.style.setProperty('border-bottom', `1px solid ${COLORS.BORDER_SEPARATOR}`, 'important');
           header.style.removeProperty('filter');
         });
@@ -245,16 +487,16 @@
      */
     static applyDialogs() {
       const dialogs = DOMCache.query(SELECTORS.USOS_DIALOG);
-			
+      
       requestAnimationFrame(() => {
         dialogs.forEach(d => {
           if (!d.shadowRoot || this.#styleCache.has(d)) return;
-					
+          
           const st = document.createElement('style');
-					st.textContent = ShadowDOMStyles.dialog;
-					
+          st.textContent = ShadowDOMStyles.dialog;
+          
           d.shadowRoot.appendChild(st);
-					this.#styleCache.set(d, true);
+          this.#styleCache.set(d, true);
         });
       });
     }
@@ -265,16 +507,16 @@
      */
     static applyInfoBoxes() {
       const boxes = DOMCache.query(SELECTORS.INFO_BOXES);
-			
+      
       requestAnimationFrame(() => {
         boxes.forEach(b => {
           if (!b.shadowRoot || this.#styleCache.has(b)) return;
-					
+          
           const st = document.createElement('style');
-					st.textContent = ShadowDOMStyles.infoBox;
-					
+          st.textContent = ShadowDOMStyles.infoBox;
+          
           b.shadowRoot.appendChild(st);
-					this.#styleCache.set(b, true);
+          this.#styleCache.set(b, true);
         });
       });
     }
@@ -290,8 +532,8 @@
       this.applyDialogs();
       this.applyInfoBoxes();
     }
-		
-		/**
+    
+    /**
      * Helper to apply a batch of CSS properties with !important to multiple elements asynchronously.
      * @param {Element[]} elements - Array of DOM elements to style.
      * @param {Object.<string, string>} styles - CSS property-value pairs.
@@ -349,20 +591,20 @@
      */
     static setupEventDelegation() {
       const { signal } = this.#abortController;
-			
+      
       document.addEventListener('click', e => {
         if (e.target.closest(SELECTORS.USOS_DIALOG)) StyleApplier.applyDialogs();
       }, {
-				passive: true,
-				signal
-			});
-			
+        passive: true,
+        signal
+      });
+      
       document.addEventListener('focusin', e => {
         if (e.target.closest(SELECTORS.USOS_DIALOG)) StyleApplier.applyDialogs();
       }, {
-				passive: true,
-				signal
-			});
+        passive: true,
+        signal
+      });
     }
 
     /**
@@ -372,9 +614,9 @@
     static setupInitialUpdate() {
       requestAnimationFrame(() => StyleApplier.applyAll());
       setTimeout(() => {
-				StyleApplier.applyAll();
-				DOMCache.invalidate();
-			}, 500);
+        StyleApplier.applyAll();
+        DOMCache.invalidate();
+      }, 500);
     }
 
     /**
@@ -385,17 +627,17 @@
     static setupMutationObserver() {
       this.#observer = new MutationObserver(() => {
         clearTimeout(this.#mutationTimeout);
-				
+        
         this.#mutationTimeout = setTimeout(() => {
-					StyleApplier.applyAll();
-					DOMCache.invalidate();
-				}, UPDATE_INTERVALS.MUTATION_DELAY);
+          StyleApplier.applyAll();
+          DOMCache.invalidate();
+        }, UPDATE_INTERVALS.MUTATION_DELAY);
       });
-			
+      
       this.#observer.observe(document.body, {
-				childList: true,
-				subtree: true
-			});
+        childList: true,
+        subtree: true
+      });
     }
 
     /**
@@ -404,7 +646,7 @@
      */
     static setupCacheCleanup() {
       const { signal } = this.#abortController;
-			
+      
       const id = setInterval(() => DOMCache.invalidateStale(), UPDATE_INTERVALS.CACHE_CLEANUP);
       signal.addEventListener('abort', () => clearInterval(id));
     }
@@ -414,12 +656,12 @@
      * @returns {void}
      */
     static checkVersion() {
-      const current = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) ? GM_info.script.version : '0.0.1';
+      const current = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) ? GM_info.script.version : '0.1.0';
       const saved = StorageManager.version;
-			
+      
       if (saved !== current) {
-				StorageManager.version = current;
-			}
+        StorageManager.version = current;
+      }
     }
 
     /**
@@ -427,9 +669,9 @@
      * @returns {void}
      */
     static toggle() {
-			StorageManager.darkMode = !StorageManager.darkMode;
-			location.reload();
-		}
+      StorageManager.darkMode = !StorageManager.darkMode;
+      location.reload();
+    }
 
     /**
      * Cleans up event listeners, observers and timeouts on unload.
@@ -438,7 +680,7 @@
     static cleanup() {
       this.#abortController.abort();
       if (this.#observer) this.#observer.disconnect();
-			
+      
       clearTimeout(this.#mutationTimeout);
       DOMCache.invalidate();
     }
@@ -448,40 +690,48 @@
    * Main application initializer and menu command manager.
    */
   class Application {
-		/**
-     * Initializes the script if dark mode enabled.
+    /**
+     * Initializes the script components based on user settings.
      * Registers menu commands and unload handlers.
      * @returns {void}
      */
     static initialize() {
-      if (!StorageManager.darkMode) {
-				this.registerMenuCommands();
-				return;
-			}
-			
       try {
-        DarkModeManager.initialize();
+        if (StorageManager.darkMode) {
+          DarkModeManager.initialize();
+        }
+        
+        if (StorageManager.averageCalculator) {
+          GradeAverageCalculator.initialize();
+        }
+        
         this.registerMenuCommands();
         this.setupUnloadHandler();
-      } catch {}
+      } catch (error) {
+        console.error('USOS Web Plus error:', error);
+      }
     }
 
     /**
-     * Registers Tampermonkey menu command to toggle dark mode.
+     * Registers Tampermonkey menu commands for toggles.
      * @returns {void}
      */
     static registerMenuCommands() {
       GM_registerMenuCommand('Toggle dark mode', () => DarkModeManager.toggle());
+      GM_registerMenuCommand('Toggle average calculator', () => GradeAverageCalculator.toggle());
     }
 
     /**
-     * Sets up handler to cleanup dark mode on page unload.
+     * Sets up handler to cleanup on page unload.
      * @returns {void}
      */
     static setupUnloadHandler() {
-      window.addEventListener('beforeunload', () => DarkModeManager.cleanup(), {
-				once: true
-			});
+      window.addEventListener('beforeunload', () => {
+        if (StorageManager.darkMode) DarkModeManager.cleanup();
+        if (StorageManager.averageCalculator) GradeAverageCalculator.cleanup();
+      }, {
+        once: true
+      });
     }
   }
 
